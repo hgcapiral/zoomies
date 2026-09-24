@@ -44,19 +44,82 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('open-comic-file', async () => {
+// --- Bookmarks (persisted to userData/bookmarks.json) ---
+
+const BOOKMARKS_FILE = path.join(app.getPath('userData'), 'bookmarks.json');
+
+function readBookmarks() {
   try {
-    const { canceled, filePaths } = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [{ name: 'Comic Books', extensions: ['cbz', 'cbr', 'zip', 'rar'] }]
-    });
+    const data = JSON.parse(fs.readFileSync(BOOKMARKS_FILE, 'utf-8'));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
 
-    if (canceled || filePaths.length === 0) return null;
+function writeBookmarks(bookmarks) {
+  try {
+    const tmp = BOOKMARKS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(bookmarks, null, 2));
+    fs.renameSync(tmp, BOOKMARKS_FILE);
+  } catch (err) {
+    console.error("Failed to save bookmarks:", err);
+  }
+}
 
+// Most recent first, flagging files that have since been moved or deleted
+function sortedBookmarks(bookmarks) {
+  return [...bookmarks]
+    .sort((a, b) => b.lastOpened - a.lastOpened)
+    .map(b => ({ ...b, missing: !fs.existsSync(b.filePath) }));
+}
+
+ipcMain.handle('bookmarks-get', () => {
+  return sortedBookmarks(readBookmarks());
+});
+
+// Insert or update the bookmark for a file; returns the full updated list
+ipcMain.handle('bookmarks-save', (_event, { filePath, lastPage, totalPages }) => {
+  const bookmarks = readBookmarks().filter(b => b.filePath !== filePath);
+  bookmarks.push({
+    filePath,
+    name: path.basename(filePath, path.extname(filePath)),
+    lastPage,
+    totalPages,
+    lastOpened: Date.now(),
+  });
+  writeBookmarks(bookmarks);
+  return sortedBookmarks(bookmarks);
+});
+
+ipcMain.handle('bookmarks-remove', (_event, filePath) => {
+  const bookmarks = readBookmarks().filter(b => b.filePath !== filePath);
+  writeBookmarks(bookmarks);
+  return sortedBookmarks(bookmarks);
+});
+
+// --- Comic loading ---
+
+ipcMain.handle('open-comic-file', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'Comic Books', extensions: ['cbz', 'cbr', 'zip', 'rar'] }]
+  });
+
+  if (canceled || filePaths.length === 0) return null;
+  return loadComic(filePaths[0]);
+});
+
+ipcMain.handle('open-comic-path', async (_event, filePath) => {
+  if (!fs.existsSync(filePath)) return null;
+  return loadComic(filePath);
+});
+
+async function loadComic(filePath) {
+  try {
     clearCache();
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-    const filePath = filePaths[0];
     const ext = path.extname(filePath).toLowerCase();
 
     // Handle CBZ / ZIP
@@ -70,16 +133,8 @@ ipcMain.handle('open-comic-file', async () => {
         filepath: filePath,
         targetPath: CACHE_DIR
       });
-      const extracted = extractor.extract();
-      for (const file of extracted.files) {
-        if (file.fileHeader.flags.directory) continue;
-        const outPath = path.join(CACHE_DIR, file.fileHeader.name);
-        const outDir = path.dirname(outPath);
-        if (!fs.existsSync(outDir)) {
-          fs.mkdirSync(outDir, { recursive: true });
-        }
-        fs.writeFileSync(outPath, file.extraction);
-      }
+      // Consuming generator extracts files directly into CACHE_DIR
+      [...extractor.extract().files];
     }
 
     function getImages(dir, fileList = []) {
@@ -98,10 +153,10 @@ ipcMain.handle('open-comic-file', async () => {
     const imageFiles = getImages(CACHE_DIR);
     imageFiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-    return imageFiles.map(file => url.pathToFileURL(file).href);
+    return { filePath, pages: imageFiles.map(file => url.pathToFileURL(file).href) };
 
   } catch (error) {
     console.error("Failed to process comic file:", error);
     return null;
   }
-});
+}

@@ -4,6 +4,8 @@ const { ipcRenderer } = window.require ? window.require('electron') : {};
 export default function App() {
   const [pages, setPages] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentFile, setCurrentFile] = useState(null);
+  const [bookmarks, setBookmarks] = useState([]);
 
   // Default Settings: Rectangle, 400px, 2x Zoom
   const [shape, setShape] = useState('rectangle');
@@ -17,7 +19,21 @@ export default function App() {
   const [lensData, setLensData] = useState({ show: false, clientX: 0, clientY: 0, bgX: 0, bgY: 0, bgWidth: 0, bgHeight: 0 });
   const imageRef = useRef(null);
 
-  const handleOpenComic = async () => {
+  // Load saved bookmarks on startup
+  useEffect(() => {
+    ipcRenderer?.invoke('bookmarks-get').then(setBookmarks);
+  }, []);
+
+  // Record the current page whenever it changes, so reading can resume later
+  useEffect(() => {
+    if (!ipcRenderer || !currentFile || pages.length === 0) return;
+    ipcRenderer
+      .invoke('bookmarks-save', { filePath: currentFile, lastPage: currentIndex, totalPages: pages.length })
+      .then(setBookmarks);
+  }, [currentFile, currentIndex, pages.length]);
+
+  // Shared loader: `channel` is the IPC handler, `args` its arguments
+  const loadComic = async (channel, ...args) => {
     if (!ipcRenderer) {
       alert("Electron IPC not available.");
       return;
@@ -27,16 +43,30 @@ export default function App() {
     setLensData(prev => ({ ...prev, show: false }));
 
     try {
-      const loadedPages = await ipcRenderer.invoke('open-comic-file');
-      if (loadedPages && loadedPages.length > 0) {
-        setPages(loadedPages);
-        setCurrentIndex(0);
+      const result = await ipcRenderer.invoke(channel, ...args);
+      if (result && result.pages.length > 0) {
+        const saved = bookmarks.find(b => b.filePath === result.filePath);
+        const resumePage = saved ? Math.min(saved.lastPage, result.pages.length - 1) : 0;
+        setPages(result.pages);
+        setCurrentFile(result.filePath);
+        setCurrentIndex(resumePage);
+      } else if (channel === 'open-comic-path') {
+        alert("Could not open this comic. The file may have been moved or deleted.");
+        ipcRenderer.invoke('bookmarks-get').then(setBookmarks);
       }
     } catch (error) {
       console.error("Error loading comic:", error);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleOpenComic = () => loadComic('open-comic-file');
+  const handleOpenBookmark = (filePath) => loadComic('open-comic-path', filePath);
+
+  const handleRemoveBookmark = async (e, filePath) => {
+    e.stopPropagation();
+    setBookmarks(await ipcRenderer.invoke('bookmarks-remove', filePath));
   };
 
   useEffect(() => {
@@ -107,48 +137,108 @@ export default function App() {
           }}
           className="bg-gray-900 border-r border-gray-800"
         >
-          <div style={{ width: '320px' }} className="p-5 flex flex-col justify-between h-full overflow-y-auto">
-            <div>
-              <h1 className="text-xl font-bold text-indigo-400">Comic Glass Reader</h1>
-              {pages.length > 0 && (
-                <p className="text-xs text-gray-400 mt-1 mb-5">
-                  Page {currentIndex + 1} of {pages.length} • Click Left/Right or use <kbd className="bg-gray-800 px-1 rounded text-gray-300">←</kbd> <kbd className="bg-gray-800 px-1 rounded text-gray-300">→</kbd>
-                </p>
+          <div style={{ width: '320px' }} className="flex flex-col h-full">
+
+            {/* Header: title, current comic, open button */}
+            <div className="p-5 pb-4 border-b border-gray-800 shrink-0">
+              <h1 className="text-lg font-bold text-indigo-400 tracking-tight">Comic Glass Reader</h1>
+              {currentFile && pages.length > 0 ? (
+                <div className="mt-2 mb-4">
+                  <p className="text-sm text-gray-200 truncate" title={currentFile}>
+                    {bookmarks.find(b => b.filePath === currentFile)?.name}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Page {currentIndex + 1} of {pages.length} · click sides or <kbd className="bg-gray-800 px-1 rounded text-gray-300">←</kbd> <kbd className="bg-gray-800 px-1 rounded text-gray-300">→</kbd>
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500 mt-2 mb-4">Open a comic to start reading.</p>
               )}
-              
               <button
                 onClick={handleOpenComic}
                 disabled={isLoading}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 py-2.5 px-4 rounded font-medium transition mb-6 shadow cursor-pointer text-sm"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 py-2 px-4 rounded-md font-medium transition shadow cursor-pointer text-sm"
               >
                 📁 Browse Comic (.cbz, .cbr)
               </button>
+            </div>
 
-              <div className="space-y-4">
-                <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Lens Settings</h2>
-                <div>
-                  <label className="text-xs text-gray-300 block mb-1">Lens Shape</label>
-                  <select value={shape} onChange={(e) => setShape(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-sm cursor-pointer">
-                    <option value="rectangle">Rectangle</option>
-                    <option value="circle">Circle</option>
-                    <option value="square">Square</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-300 block mb-1">Lens Size: {size}px</label>
-                  <input 
-                    type="range" 
-                    min="200" 
-                    max="1000" 
-                    value={size} 
-                    onChange={(e) => setSize(Number(e.target.value))} 
-                    className="w-full accent-indigo-500 cursor-pointer" 
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-300 block mb-1">Zoom Level: {zoomLevel}x</label>
-                  <input type="range" min="1.5" max="4" step="0.5" value={zoomLevel} onChange={(e) => setZoomLevel(Number(e.target.value))} className="w-full accent-indigo-500 cursor-pointer" />
-                </div>
+            {/* Bookmarks: the only part of the sidebar that scrolls */}
+            <div className="flex-1 min-h-0 flex flex-col pt-4">
+              <div className="px-5 mb-2 flex items-baseline justify-between">
+                <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Recently Read</h2>
+                {bookmarks.length > 0 && <span className="text-xs text-gray-600">{bookmarks.length}</span>}
+              </div>
+              {bookmarks.length === 0 ? (
+                <p className="px-5 text-xs text-gray-600">Comics you open will appear here, with your last page saved.</p>
+              ) : (
+                <ul className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 space-y-1">
+                  {bookmarks.map((b) => {
+                    const isCurrent = b.filePath === currentFile;
+                    const progress = b.totalPages > 0 ? ((b.lastPage + 1) / b.totalPages) * 100 : 0;
+                    return (
+                      <li key={b.filePath}>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => !isLoading && handleOpenBookmark(b.filePath)}
+                          onKeyDown={(e) => e.key === 'Enter' && !isLoading && handleOpenBookmark(b.filePath)}
+                          title={b.filePath}
+                          className={`group rounded-md px-2 py-2 cursor-pointer transition border ${
+                            isCurrent ? 'bg-indigo-950/60 border-indigo-800' : 'border-transparent hover:bg-gray-800'
+                          } ${b.missing ? 'opacity-50' : ''}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <p className={`flex-1 min-w-0 text-sm truncate ${isCurrent ? 'text-indigo-200' : 'text-gray-200'}`}>{b.name}</p>
+                            <button
+                              onClick={(e) => handleRemoveBookmark(e, b.filePath)}
+                              className="shrink-0 text-gray-500 hover:text-red-400 text-xs px-1 opacity-0 group-hover:opacity-100 transition cursor-pointer"
+                              title="Remove bookmark"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1.5">
+                            <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+                              <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${progress}%` }} />
+                            </div>
+                            <span className="shrink-0 text-[11px] text-gray-500 tabular-nums">
+                              {b.missing ? 'File not found' : `${b.lastPage + 1} / ${b.totalPages}`}
+                            </span>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            {/* Lens settings: pinned to the bottom */}
+            <div className="p-5 pt-4 border-t border-gray-800 shrink-0 space-y-3">
+              <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Lens Settings</h2>
+              <div>
+                <label className="text-xs text-gray-300 block mb-1">Lens Shape</label>
+                <select value={shape} onChange={(e) => setShape(e.target.value)} className="w-full bg-gray-800 border border-gray-700 rounded-md p-1.5 text-sm cursor-pointer">
+                  <option value="rectangle">Rectangle</option>
+                  <option value="circle">Circle</option>
+                  <option value="square">Square</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-300 flex justify-between mb-1"><span>Lens Size</span><span className="text-gray-500">{size}px</span></label>
+                <input
+                  type="range"
+                  min="200"
+                  max="1000"
+                  value={size}
+                  onChange={(e) => setSize(Number(e.target.value))}
+                  className="w-full accent-indigo-500 cursor-pointer"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-300 flex justify-between mb-1"><span>Zoom Level</span><span className="text-gray-500">{zoomLevel}x</span></label>
+                <input type="range" min="1.5" max="4" step="0.5" value={zoomLevel} onChange={(e) => setZoomLevel(Number(e.target.value))} className="w-full accent-indigo-500 cursor-pointer" />
               </div>
             </div>
           </div>
