@@ -5,7 +5,11 @@ const url = require('url');
 const AdmZip = require('adm-zip');
 const unrar = require('node-unrar-js');
 
-const CACHE_DIR = path.join(app.getPath('temp'), 'comic-glass-reader-cache');
+// Each running instance extracts into its own folder, so one instance clearing its
+// cache can't delete the pages another instance is showing.
+const CACHE_ROOT = path.join(app.getPath('temp'), 'comic-glass-reader');
+const INSTANCE_PREFIX = 'instance-';
+const CACHE_DIR = path.join(CACHE_ROOT, INSTANCE_PREFIX + process.pid);
 
 // Launched as `electron electron/main.cjs`, Electron would store data in a generic
 // "Electron" folder shared by every unpackaged Electron app; give the app its own.
@@ -18,6 +22,35 @@ function clearCache() {
       fs.rmSync(CACHE_DIR, { recursive: true, force: true });
     } catch (err) {
       console.error("Failed to clear cache:", err);
+    }
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+// Remove folders left behind by instances that crashed or were killed.
+function clearStaleCaches() {
+  let entries;
+  try {
+    entries = fs.readdirSync(CACHE_ROOT);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(INSTANCE_PREFIX)) continue;
+    const pid = Number(name.slice(INSTANCE_PREFIX.length));
+    if (pid === process.pid || (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid))) continue;
+    try {
+      fs.rmSync(path.join(CACHE_ROOT, name), { recursive: true, force: true });
+    } catch (err) {
+      console.error("Failed to clear stale cache:", err);
     }
   }
 }
@@ -38,6 +71,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   clearCache();
+  clearStaleCaches();
   createWindow();
 });
 
