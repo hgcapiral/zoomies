@@ -7,6 +7,11 @@ const unrar = require('node-unrar-js');
 
 const CACHE_DIR = path.join(app.getPath('temp'), 'comic-glass-reader-cache');
 
+// Launched as `electron electron/main.cjs`, Electron would store data in a generic
+// "Electron" folder shared by every unpackaged Electron app; give the app its own.
+const LEGACY_USER_DATA = app.getPath('userData');
+app.setPath('userData', path.join(app.getPath('appData'), 'Comic Glass Reader'));
+
 function clearCache() {
   if (fs.existsSync(CACHE_DIR)) {
     try {
@@ -47,6 +52,17 @@ app.on('window-all-closed', () => {
 // --- Bookmarks (persisted to userData/bookmarks.json) ---
 
 const BOOKMARKS_FILE = path.join(app.getPath('userData'), 'bookmarks.json');
+
+// One-time move of bookmarks saved before the app had its own data folder
+const LEGACY_BOOKMARKS_FILE = path.join(LEGACY_USER_DATA, 'bookmarks.json');
+if (!fs.existsSync(BOOKMARKS_FILE) && fs.existsSync(LEGACY_BOOKMARKS_FILE)) {
+  try {
+    fs.mkdirSync(path.dirname(BOOKMARKS_FILE), { recursive: true });
+    fs.copyFileSync(LEGACY_BOOKMARKS_FILE, BOOKMARKS_FILE);
+  } catch (err) {
+    console.error("Failed to migrate bookmarks:", err);
+  }
+}
 
 function readBookmarks() {
   try {

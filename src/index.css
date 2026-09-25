@@ -2,6 +2,18 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Default (blue) accent until the saved theme is applied; see src/themes.js */
+  --accent-200: 186 230 253;
+  --accent-300: 125 211 252;
+  --accent-400: 56 189 248;
+  --accent-500: 14 165 233;
+  --accent-600: 2 132 199;
+  --accent-800: 7 89 133;
+  --accent-950: 8 47 73;
+  --accent-on: 255 255 255;
+}
+
 html,
 body,
 #root {
@@ -14,4 +26,28 @@ body {
   color: #fff;
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Speech bubble zoom: grows out of the bubble's spot on the page (see App.jsx) */
+@keyframes bubble-pop {
+  from {
+    transform: var(--pop-from);
+    opacity: 0.5;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* Position readout: show briefly, then get out of the way */
+@keyframes hud-fade {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Thin, dark scrollbars to match the sidebar (default ones are bright white on Windows) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #374151 transparent;
 }
