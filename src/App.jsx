@@ -129,10 +129,10 @@ export default function App() {
   const [currentFile, setCurrentFile] = useState(null);
   const [bookmarks, setBookmarks] = useState([]);
 
-  // Default Settings: Rectangle, 400px, 2x Zoom
-  const [shape, setShape] = useState('rectangle');
-  const [size, setSize] = useState(400);
-  const [zoomLevel, setZoomLevel] = useState(2);
+  // Lens settings (default: rectangle, 400px, 2x zoom)
+  const [shape, setShape] = useStoredSetting('lensShape', 'rectangle');
+  const [size, setSize] = useStoredSetting('lensSize', 400);
+  const [zoomLevel, setZoomLevel] = useStoredSetting('lensZoom', 2);
 
   // UI State
   const [isLoading, setIsLoading] = useState(false);
@@ -144,9 +144,11 @@ export default function App() {
   const [viewMode, setViewMode] = useStoredSetting('viewMode', 'lens'); // 'lens' | 'panel' | 'bubble'
   const panelMode = viewMode === 'panel';
   const bubbleMode = viewMode === 'bubble';
-  const [fullPageFirst, setFullPageFirst] = useState(true); // show the whole page before zooming in
-  const [bubbleZoomLevel, setBubbleZoomLevel] = useState(2.5); // how much an active bubble is enlarged
-  const [step, setStep] = useState(null); // null = whole page, a panel/bubble index, or 'last'
+  const [fullPageFirst, setFullPageFirst] = useStoredSetting('fullPageFirst', true); // show the whole page before zooming in
+  const [fullPageAfter, setFullPageAfter] = useStoredSetting('fullPageAfter', false); // and again after the last panel/bubble
+  const [bubbleZoomLevel, setBubbleZoomLevel] = useStoredSetting('bubbleZoom', 2.5); // how much an active bubble is enlarged
+  // null = whole page before, a panel/bubble index, 'last', or 'after' = whole page after the last one
+  const [step, setStep] = useState(null);
   const [detectedByPage, setDetectedByPage] = useState({}); // page URL -> { panels, bubbles }
   const [hoverBubble, setHoverBubble] = useState(-1); // bubble under the mouse in Bubble View
   const requestedPages = useRef(new Set());
@@ -296,7 +298,7 @@ export default function App() {
   const pagePanels = detected && detected.panels.filter(p => p.w * p.h < 0.9);
   const items = bubbleMode ? pageBubbles : panelMode ? pagePanels : null; // what the arrows step through
   const noun = bubbleMode ? 'bubble' : 'panel';
-  const activeIndex = items?.length > 0 && step !== null
+  const activeIndex = items?.length > 0 && step !== null && step !== 'after'
     ? (step === 'last' ? items.length - 1 : Math.min(step, items.length - 1))
     : null;
   const activeBubble = bubbleMode ? activeIndex : null;
@@ -316,18 +318,20 @@ export default function App() {
     setHoverBubble(-1);
     setCurrentIndex(next);
     if (delta > 0) setStep(fullPageFirst ? null : 0);
-    else setStep('last');
+    else setStep(fullPageAfter ? 'after' : 'last');
   };
 
   const goNext = () => {
-    if (items?.length > 0) {
+    if (items?.length > 0 && step !== 'after') {
       if (step === null) return setStep(0);
       if (activeIndex < items.length - 1) return setStep(activeIndex + 1);
+      if (fullPageAfter) return setStep('after');
     }
     turnPage(1);
   };
 
   const goPrev = () => {
+    if (step === 'after' && items?.length > 0) return setStep('last');
     if (activeIndex !== null) {
       if (activeIndex > 0) return setStep(activeIndex - 1);
       if (fullPageFirst) return setStep(null);
@@ -633,6 +637,15 @@ export default function App() {
                         className="accent-accent-500 cursor-pointer"
                       />
                       Show full page before zooming into panels / bubbles
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={fullPageAfter}
+                        onChange={(e) => setFullPageAfter(e.target.checked)}
+                        className="accent-accent-500 cursor-pointer"
+                      />
+                      Show full page after the last panel / bubble
                     </label>
                   </div>
 

@@ -44,6 +44,16 @@ const MIN_HOLLOW_ASPECT = 0.5;    // outlined lettering: a letter's inside is at
 const MIN_HOLLOW_LETTERS = 8;     // ...and a balloon read that way needs at least this many,
 const HOLLOW_HEIGHT_SPREAD = 0.3; // ...within this fraction of their typical height
 const MIN_LINED_SHARE = 0.6;      // ...and most of them with a neighbour right beside them on their line
+// Artwork that passes as text (faces, flowers, hair: eyes and strokes as "letters"):
+const MIN_LETTER_INK = 0.3;       // letters are solid strokes; sketchy hatching fills little of its box...
+const DENSE_TEXT_LETTERS = 20;    // ...except in long passages of a thin font, recognisable by their lines
+const MIN_RUN = 3;                // a text line: at least this many letters side by side
+const MIN_RUN_SHARE = 0.6;        // ...holding this share of the letters in real text
+const SMALL_LETTER = 0.012;       // below this height (fraction of the page), short text must be clean:
+const MIN_SHORT_TEXT_INK = 0.6;   // its letters are most of the ink inside the region (not a nose, mouth...)
+const TINY_LETTER = 0.0068;       // letters this small (eye-sized) must be most of the ink,
+const MIN_TINY_TEXT_INK = 0.7;
+const DOTS_HEIGHT_SPREAD = 0.02;  // unless they're a row of identical marks: "..." (a face's features vary)
 const MIN_BUBBLE_LUM = 170;       // bubbles are bright (white/light balloons)...
 const MIN_BUBBLE_CHROMA = 60;     // ...or vividly coloured captions; dull mid-tones are artwork (hats, shadows)
 const MIN_TEXT_COVERAGE = 0.1;    // the lettering's bounding box must cover this much of the region's area
@@ -335,7 +345,7 @@ function containsText({ data, width, height }, labels, region) {
 
   if (enclosed / (enclosed + region.count) > MAX_INK_SHARE) return false;
   const textArea = (region.count + enclosed) * (clean ? CLEAN_MIN_COVERAGE : MIN_TEXT_COVERAGE);
-  if (looksLikeText(glyphs, minGlyphs, textArea)) return true;
+  if (looksLikeText(glyphs, minGlyphs, textArea)) return !looksLikeArtwork(glyphs, ink, height);
 
   // Outlined ("hollow") lettering, common in manga shouts: the outlines of neighbouring
   // letters and lines touch, merging all the ink into one blob too big to be a letter.
@@ -417,6 +427,40 @@ function looksLikeText(glyphs, minGlyphs, textArea) {
     Math.abs(o.cy - g.cy) <= median * 0.4 &&
     Math.max(o.x0 - g.x1, g.x0 - o.x1) <= median * 1.2));
   if (lined.length >= 2 && lined.length >= letters.length * MIN_LINED_SHARE) return true;
+  return false;
+}
+
+// Do these "letters" come from drawn features instead of lettering? Real lettering is
+// solid, forms lines of several letters, and makes up nearly all the ink in its balloon;
+// a face's eyes or a petal's strokes are sketchy, sparse, few to a line, or share the
+// region with other ink (a nose, a mouth).
+function looksLikeArtwork(glyphs, ink, height) {
+  const median = glyphs.map(g => g.h).sort((a, b) => a - b)[glyphs.length >> 1];
+  const letters = glyphs.filter(g => g.h >= median * 0.6 && g.h <= median * 1.6);
+  const letterInk = letters.reduce((sum, g) => sum + g.n, 0);
+  const density = letterInk / letters.reduce((sum, g) => sum + g.w * g.h, 0);
+  let inkTotal = 0;
+  for (const v of ink) inkTotal += v;
+  const inkShare = letterInk / Math.max(1, inkTotal);
+
+  // Share of the letters standing in lines of MIN_RUN or more
+  const line = letters.map((_, i) => i);
+  const find = (i) => (line[i] === i ? i : (line[i] = find(line[i])));
+  letters.forEach((g, i) => letters.forEach((o, j) => {
+    if (j > i && Math.abs(o.cy - g.cy) <= median * 0.4 &&
+      Math.max(o.x0 - g.x1, g.x0 - o.x1) <= median * 1.2) line[find(i)] = find(j);
+  }));
+  const lineSize = new Map();
+  letters.forEach((_, i) => lineSize.set(find(i), (lineSize.get(find(i)) ?? 0) + 1));
+  const runShare = letters.filter((_, i) => lineSize.get(find(i)) >= MIN_RUN).length / letters.length;
+
+  const size = median / height;
+  if (density < MIN_LETTER_INK && !(letters.length >= DENSE_TEXT_LETTERS && runShare >= MIN_RUN_SHARE)) return true;
+  if (runShare === 0 && size < SMALL_LETTER && inkShare < MIN_SHORT_TEXT_INK) return true;
+  const meanH = letters.reduce((sum, g) => sum + g.h, 0) / letters.length;
+  const spread = Math.sqrt(letters.reduce((sum, g) => sum + (g.h - meanH) ** 2, 0) / letters.length) / meanH;
+  const dots = letters.length >= MIN_RUN && spread <= DOTS_HEIGHT_SPREAD;
+  if (size < TINY_LETTER && inkShare < MIN_TINY_TEXT_INK && !dots) return true;
   return false;
 }
 
