@@ -978,8 +978,24 @@ export function orderBoxes(boxes, slack, rtl) {
     return cols.flatMap(group => orderBoxes(group, slack, rtl));
   }
 
-  // No clean cut: fall back to top-then-left ordering
-  return [...boxes].sort((a, b) => (a.y0 - b.y0) || (rtl ? b.x1 - a.x1 : a.x0 - b.x0));
+  // No clean cut (boxes overlapping both ways): rank each box by how many others it reads before
+  return byPrecedence(boxes, rtl);
+}
+
+// A reads before B when its middle is above B's top; side by side (at about the same height)
+// the one nearer the start of the line goes first: the right one for right-to-left reading.
+// Strictly top-first ordering read a balloon a hair higher on the far side of the panel first.
+function readsBefore(a, b, rtl) {
+  if ((a.y0 + a.y1) / 2 < b.y0) return true;
+  if ((b.y0 + b.y1) / 2 < a.y0) return false;
+  return rtl ? a.x0 + a.x1 > b.x0 + b.x1 : a.x0 + a.x1 < b.x0 + b.x1;
+}
+
+function byPrecedence(boxes, rtl) {
+  const ranked = boxes.map((b, i) => ({
+    b, i, wins: boxes.reduce((n, o) => n + (o !== b && readsBefore(b, o, rtl) ? 1 : 0), 0),
+  }));
+  return ranked.sort((p, q) => q.wins - p.wins || p.b.y0 - q.b.y0 || p.i - q.i).map(p => p.b);
 }
 
 // Partition boxes into bands along an axis, cutting wherever no (slack-shrunk) box spans the cut

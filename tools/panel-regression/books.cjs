@@ -16,4 +16,9 @@ module.exports = [
     path: `D:\\Downloads\\Black Clover (Digital) (DigitalMangaFan)\\Black Clover v0${n} (2016) (Digital) (DigitalMangaFan).cbz`,
     style: 'manga', rtl: true,
   })),
+  {
+    id: 'BK01', // dense, irregular manga layouts; bubble reading-order problems reported here
+    path: 'D:\\Downloads\\Berserk (Digital) (danke-Empire)\\Berserk v01 (2003) (Digital) (danke-Empire).cbz',
+    style: 'manga', rtl: true,
+  },
 ];

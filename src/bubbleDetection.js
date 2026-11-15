@@ -82,6 +82,9 @@ const SHAPE_MAX_LEAK = 0.15;      // ...and has at most this much more outside a
 const SHAPE_RECT_FILL = 0.9;      // a shape filling this much of its own bounding box is a rectangle (caption)...
 const SHAPE_SIDE_GAP = 0.04;      // ...which must reach within 2 paddings + this share of the box of each side
 const ORDER_SLACK = 0.01;
+const PAGE_ORDER_SLACK = 0.03;    // ordering panels with loose bubbles: as panelDetection orders panels
+const SEAM_MAX = 0.05;            // panels overlapping in a band at most this thick (fraction of page)...
+const SEAM_SPAN = 0.5;            // ...along at least this share of the narrower one's side are neighbours
 const NESTED_SHARE = 0.8;       // a panel this much inside another is read within it
 
 const luminance = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
@@ -741,25 +744,6 @@ export function orderByPanel(boxes, panels, width, height, rtl) {
   const panelBoxes = panels.map(p => ({
     x0: p.x * width, y0: p.y * height, x1: (p.x + p.w) * width, y1: (p.y + p.h) * height,
   }));
-  const groups = panelBoxes.map(() => []);
-
-  for (const b of boxes) {
-    // The panel it overlaps most (bubbles often straddle a gutter), else the nearest one
-    let bestPanel = 0, bestScore = -Infinity;
-    panelBoxes.forEach((p, i) => {
-      const overlap =
-        Math.max(0, Math.min(b.x1, p.x1) - Math.max(b.x0, p.x0)) *
-        Math.max(0, Math.min(b.y1, p.y1) - Math.max(b.y0, p.y0));
-      const distance = Math.hypot((b.x0 + b.x1 - p.x0 - p.x1) / 2, (b.y0 + b.y1 - p.y0 - p.y1) / 2);
-      // Ties (a bubble fully inside nested panel boxes) go to the smallest panel
-      const area = (p.x1 - p.x0) * (p.y1 - p.y0);
-      const score = overlap > 0 ? overlap - area * 1e-6 : -distance;
-      if (score > bestScore) { bestScore = score; bestPanel = i; }
-    });
-    groups[bestPanel].push(b);
-  }
-
-  const slack = { x: width * ORDER_SLACK, y: height * ORDER_SLACK };
 
   // A panel lying inside another (an inset, or a panel whose gutter detection merged
   // with its surroundings) is read in its place within the outer panel, as one block,
@@ -772,6 +756,26 @@ export function orderByPanel(boxes, panels, width, height, rtl) {
     });
     return best;
   });
+  trimSeams(panelBoxes, parent, width, height);
+
+  // Each bubble goes to a panel holding its centre: the one it overlaps most (bubbles often
+  // straddle a gutter), the smallest on a tie. A bubble whose centre is in no panel (its
+  // panel wasn't found, or it sits on a gutter) is read in its own place among the panels.
+  const groups = panelBoxes.map(() => []);
+  const loose = [];
+  for (const b of boxes) {
+    const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+    let bestPanel = -1, bestScore = -Infinity;
+    panelBoxes.forEach((p, i) => {
+      if (cx < p.x0 || cx >= p.x1 || cy < p.y0 || cy >= p.y1) return;
+      const score = overlapArea(b, p) - boxArea(p) * 1e-6;
+      if (score > bestScore) { bestScore = score; bestPanel = i; }
+    });
+    if (bestPanel >= 0) groups[bestPanel].push(b);
+    else loose.push(b);
+  }
+
+  const slack = { x: width * ORDER_SLACK, y: height * ORDER_SLACK };
 
   // Bubbles of panel i in reading order, with nested panels slotted in as blocks
   const readPanel = (i) => {
@@ -781,7 +785,39 @@ export function orderByPanel(boxes, panels, width, height, rtl) {
     ];
     return orderBoxes(items, slack, rtl).flatMap(item => item.bubbles);
   };
-  return panelBoxes.flatMap((_, i) => parent[i] < 0 ? readPanel(i) : []);
+  const roots = panelBoxes.flatMap((_, i) => parent[i] < 0 ? [i] : []);
+  if (loose.length === 0) return roots.flatMap(readPanel); // panels in their detected order
+
+  // Loose bubbles: order them with the panels, as panel detection orders panels
+  const items = [
+    ...roots.map(i => ({ ...box(panelBoxes[i]), bubbles: readPanel(i) })),
+    ...loose.map(b => ({ ...box(b), bubbles: [b] })),
+  ];
+  const pageSlack = { x: width * PAGE_ORDER_SLACK, y: height * PAGE_ORDER_SLACK };
+  return orderBoxes(items, pageSlack, rtl).flatMap(item => item.bubbles);
+}
+
+// Panels from detection often overlap their neighbours a little (a box running into the next
+// row). Where two panels overlap only in a thin band along most of the narrower one's side,
+// the larger is cut back to where the smaller begins, so the bubbles there aren't counted in it.
+function trimSeams(panelBoxes, parent, width, height) {
+  for (let i = 0; i < panelBoxes.length; i++) {
+    for (let j = i + 1; j < panelBoxes.length; j++) {
+      if (parent[i] === j || parent[j] === i) continue; // an inset isn't a neighbour
+      const [big, small] = boxArea(panelBoxes[i]) >= boxArea(panelBoxes[j])
+        ? [panelBoxes[i], panelBoxes[j]] : [panelBoxes[j], panelBoxes[i]];
+      const ow = Math.min(big.x1, small.x1) - Math.max(big.x0, small.x0);
+      const oh = Math.min(big.y1, small.y1) - Math.max(big.y0, small.y0);
+      if (ow <= 0 || oh <= 0) continue;
+      if (oh <= height * SEAM_MAX && ow >= Math.min(big.x1 - big.x0, small.x1 - small.x0) * SEAM_SPAN) {
+        if (big.y0 < small.y0) big.y1 = Math.min(big.y1, small.y0);
+        else big.y0 = Math.max(big.y0, small.y1);
+      } else if (ow <= width * SEAM_MAX && oh >= Math.min(big.y1 - big.y0, small.y1 - small.y0) * SEAM_SPAN) {
+        if (big.x0 < small.x0) big.x1 = Math.min(big.x1, small.x0);
+        else big.x0 = Math.max(big.x0, small.x1);
+      }
+    }
+  }
 }
 
 const box = ({ x0, y0, x1, y1 }) => ({ x0, y0, x1, y1 });

@@ -208,7 +208,7 @@ async function runApp(bitmap, panels, rtl) {
 const COLORS = ['#ff3b30', '#34c759', '#0a84ff', '#ffcc00', '#bf5af2', '#ff9f0a', '#64d2ff', '#ff2d55'];
 const rgb = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
 
-async function drawRow(bitmap, page, res, file) {
+async function drawRow(bitmap, page, res, file, panels = []) {
   const W = bitmap.width, H = bitmap.height;
   const TW = METHODS.length <= 2 ? 560 : 340, TH = Math.round((TW * H) / W), PAD = 10, LABEL = 24;
   const canvas = new OffscreenCanvas(PAD + METHODS.length * (TW + PAD), LABEL + TH + PAD);
@@ -221,6 +221,15 @@ async function drawRow(bitmap, page, res, file) {
     ctx.fillStyle = '#fff';
     ctx.font = '14px sans-serif';
     ctx.fillText(`${page.book} p${page.index + 1} · ${LABELS[m]} · ${res[m].length}`, ox, 17);
+    if (m === 'app') { // the panels the bubbles are ordered by: white dashed, P1, P2... in reading order
+      panels.filter(p => p.w * p.h < 0.9).forEach((p, k) => {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([8, 5]);
+        ctx.strokeRect(ox + p.x * TW + 3, oy + p.y * TH + 3, p.w * TW - 6, p.h * TH - 6);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#fff'; ctx.fillRect(ox + (p.x + p.w) * TW - 30, oy + p.y * TH + 3, 27, 16);
+        ctx.fillStyle = '#000'; ctx.font = 'bold 12px sans-serif'; ctx.fillText('P' + (k + 1), ox + (p.x + p.w) * TW - 27, oy + p.y * TH + 15);
+      });
+    }
     res[m].forEach((p, k) => {
       const color = COLORS[k % COLORS.length];
       if (p._mask) { // the bubble's own shape, tinted
@@ -281,10 +290,10 @@ ipcRenderer.on('run', async (_e, job) => {
         res[name] = await runModel(name, bitmap, panels, page.rtl);
         time[name] = performance.now() - t;
       }
-      if (sample.has(`${page.book}:${page.index}`)) await drawRow(bitmap, page, res, path.join(job.outDir, 'rows', `${page.book}-${page.index}.png`));
+      if (sample.has(`${page.book}:${page.index}`)) await drawRow(bitmap, page, res, path.join(job.outDir, 'rows', `${page.book}-${page.index}.png`), panels);
       bitmap.close();
       for (const m of METHODS) for (const p of res[m]) delete p._mask;
-      out.push({ book: page.book, index: page.index, res, time });
+      out.push({ book: page.book, index: page.index, res, time, panels });
       ipcRenderer.send('page-done');
     }
     ipcRenderer.send(`done-${id}`, { pages: out, env: { crossOriginIsolated, threads: job.threads, ep: job.ep } });
