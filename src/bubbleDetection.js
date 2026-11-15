@@ -79,6 +79,8 @@ const FLOAT_MAX_INK = 0.75;       // ...nor solid strokes (share of their box th
 // Shapes for a trained detector's balloon boxes (bubblesFromBoxes):
 const SHAPE_MIN_FILL = 0.3;       // the balloon's fill covers at least this much of its box...
 const SHAPE_MAX_LEAK = 0.15;      // ...and has at most this much more outside all balloon boxes
+const SHAPE_RECT_FILL = 0.9;      // a shape filling this much of its own bounding box is a rectangle (caption)...
+const SHAPE_SIDE_GAP = 0.04;      // ...which must reach within 2 paddings + this share of the box of each side
 const ORDER_SLACK = 0.01;
 const NESTED_SHARE = 0.8;       // a panel this much inside another is read within it
 
@@ -174,7 +176,7 @@ export function bubblesFromBoxes(image, items, { rtl = false, style = 'comic', p
 
   for (const b of boxes) {
     const w = b.x1 - b.x0, h = b.y1 - b.y0;
-    b.mask = (b.balloon && balloonShape(labels, width, b, total, covered, pad)) ||
+    b.mask = (b.balloon && balloonShape(image, labels, b, total, covered, pad)) ||
       { width: w, height: h, data: new Uint8Array(w * h).fill(1) };
   }
 
@@ -187,42 +189,88 @@ export function bubblesFromBoxes(image, items, { rtl = false, style = 'comic', p
   }));
 }
 
-// The balloon's shape inside its box: the region filling most of the box, with the lettering it
-// encloses, grown by `pad` to take in the outline. Null when no such region (a gradient caption)
-// or when it leaks out of the balloon boxes (a borderless balloon on the page background).
-function balloonShape(labels, width, box, total, covered, pad) {
+// The balloon's shape inside its box: the region filling most of the box, grown across gentle
+// shading (captions often have a gradient), with the lettering it encloses, grown by `pad` to
+// take in the outline. Null (use the whole box) when there's no such region, when it leaks out
+// of the balloon boxes (a borderless balloon on the page background), or when it's a rectangle
+// that stops short of the box (part of a caption whose shading changes too fast to follow).
+function balloonShape({ data, width }, labels, box, total, covered, pad) {
   const w = box.x1 - box.x0, h = box.y1 - box.y0;
+  const at = k => (box.y0 + Math.floor(k / w)) * width + box.x0 + (k % w); // box pixel -> page pixel
   const counts = new Map();
-  for (let y = box.y0; y < box.y1; y++) {
-    for (let x = box.x0; x < box.x1; x++) {
-      const id = labels[y * width + x];
-      counts.set(id, (counts.get(id) || 0) + 1);
-    }
+  for (let k = 0; k < w * h; k++) {
+    const id = labels[at(k)];
+    counts.set(id, (counts.get(id) || 0) + 1);
   }
   let id = -1, inside = 0;
   for (const [k, n] of counts) if (n > inside) { id = k; inside = n; }
   if (inside < w * h * SHAPE_MIN_FILL || total[id] - covered[id] > inside * SHAPE_MAX_LEAK) return null;
 
-  // Everything not reachable from the box's edge without crossing the fill is part of the balloon
-  const outside = new Uint8Array(w * h);
+  // The fill: the region, plus neighbouring pixels while the colour changes only gradually
+  const fill = new Uint8Array(w * h);
   const queue = new Int32Array(w * h);
   let tail = 0;
-  const seed = (x, y) => {
-    const k = y * w + x;
-    if (!outside[k] && labels[(y + box.y0) * width + x + box.x0] !== id) { outside[k] = 1; queue[tail++] = k; }
+  const mean = [0, 0, 0];
+  for (let k = 0; k < w * h; k++) {
+    if (labels[at(k)] !== id) continue;
+    fill[k] = 1;
+    queue[tail++] = k;
+    const p = at(k) * 4;
+    mean[0] += data[p]; mean[1] += data[p + 1]; mean[2] += data[p + 2];
+  }
+  for (let c = 0; c < 3; c++) mean[c] /= tail;
+  for (let head = 0; head < tail;) {
+    const k = queue[head++];
+    const p = at(k) * 4;
+    const x = k % w, y = (k - x) / w;
+    const grow = (nk) => {
+      if (fill[nk]) return;
+      const q = at(nk) * 4;
+      const sr = data[q] - data[p], sg = data[q + 1] - data[p + 1], sb = data[q + 2] - data[p + 2];
+      if (sr * sr + sg * sg + sb * sb > SHADE_STEP * SHADE_STEP) return;
+      const dr = data[q] - mean[0], dg = data[q + 1] - mean[1], db = data[q + 2] - mean[2];
+      if (dr * dr + dg * dg + db * db > SHADE_DRIFT * SHADE_DRIFT) return;
+      fill[nk] = 1;
+      queue[tail++] = nk;
+    };
+    if (x > 0) grow(k - 1);
+    if (x < w - 1) grow(k + 1);
+    if (y > 0) grow(k - w);
+    if (y < h - 1) grow(k + w);
+  }
+
+  // Everything not reachable from the box's edge without crossing the fill is part of the balloon
+  const outside = new Uint8Array(w * h);
+  tail = 0;
+  const seed = (k) => {
+    if (!outside[k] && !fill[k]) { outside[k] = 1; queue[tail++] = k; }
   };
-  for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
-  for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
+  for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
   for (let head = 0; head < tail;) {
     const k = queue[head++];
     const x = k % w, y = (k - x) / w;
-    if (x > 0) seed(x - 1, y);
-    if (x < w - 1) seed(x + 1, y);
-    if (y > 0) seed(x, y - 1);
-    if (y < h - 1) seed(x, y + 1);
+    if (x > 0) seed(k - 1);
+    if (x < w - 1) seed(k + 1);
+    if (y > 0) seed(k - w);
+    if (y < h - 1) seed(k + w);
   }
   const shape = new Uint8Array(w * h);
-  for (let k = 0; k < w * h; k++) shape[k] = outside[k] ? 0 : 1;
+  let sx0 = w, sy0 = h, sx1 = 0, sy1 = 0, on = 0;
+  for (let k = 0; k < w * h; k++) {
+    if (outside[k]) continue;
+    shape[k] = 1;
+    on++;
+    const x = k % w, y = (k - x) / w;
+    if (x < sx0) sx0 = x;
+    if (x >= sx1) sx1 = x + 1;
+    if (y < sy0) sy0 = y;
+    if (y >= sy1) sy1 = y + 1;
+  }
+  // A rectangle (caption) that doesn't reach the box's sides is only part of the caption
+  const gapX = pad * 2 + w * SHAPE_SIDE_GAP, gapY = pad * 2 + h * SHAPE_SIDE_GAP;
+  const boxy = on >= (sx1 - sx0) * (sy1 - sy0) * SHAPE_RECT_FILL;
+  if (boxy && (sx0 > gapX || sy0 > gapY || w - sx1 > gapX || h - sy1 > gapY)) return null;
   return { width: w, height: h, data: dilate(shape, w, h, pad) };
 }
 
