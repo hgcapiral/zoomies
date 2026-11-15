@@ -255,7 +255,8 @@ export default function App() {
       const url = pages[i];
       if (!url || requestedPages.current.has(url)) continue;
       requestedPages.current.add(url);
-      detectPage(url, { rtl: mangaMode })
+      // Manga mode picks both the reading order and the manga panel detector
+      detectPage(url, { rtl: mangaMode, style: mangaMode ? 'manga' : 'comic' })
         .catch((error) => {
           console.error("Panel/bubble detection failed:", error);
           return { panels: [], bubbles: [] };

@@ -1,5 +1,11 @@
-// Comic panel detection.
+// Rule-based panel detection, with one pipeline per page style (`detectPanels(image, { style })`):
+// - 'comic': Western comics, described below.
+// - 'manga': for now the comic pipeline; manga-specific steps go in findMangaPanels.
+//   The app reads manga with a trained model (mangaPanels.js) and falls back to this.
+// This module must stay free of imports: tools/panel-regression loads it from a Blob URL.
+// Both return pixel boxes; detectPanels puts them in reading order (right to left for manga).
 //
+// Comic pipeline:
 // 1. Gutters (the strips between panels) are near-black or near-white straight
 //    bands forming a network connected to the page edge. We pick the gutter colour
 //    that dominates the page border, keep only pixels of that colour lying on long
@@ -86,12 +92,35 @@ const FULL_PAGE = [{ x: 0, y: 0, w: 1, h: 1 }];
 
 /**
  * @param {{ data: Uint8ClampedArray, width: number, height: number }} image RGBA (or BGRA) pixels
- * @param {{ rtl?: boolean }} options rtl: read columns right-to-left (manga)
+ * @param {{ style?: 'comic' | 'manga', rtl?: boolean }} options style: which pipeline finds the panels;
+ *   rtl: read columns right-to-left (manga)
  * @returns {{ x: number, y: number, w: number, h: number }[]} panels normalised to 0..1, in reading order
  */
-export function detectPanels({ data, width, height }, { rtl = false } = {}) {
+export function detectPanels({ data, width, height }, { style = 'comic', rtl = false } = {}) {
+  const findPanels = style === 'manga' ? findMangaPanels : findComicPanels;
+  const boxes = findPanels(data, width, height);
+  if (!boxes || boxes.length < 2) return FULL_PAGE;
+
+  const slack = { x: width * ORDER_SLACK, y: height * ORDER_SLACK };
+  return orderBoxes(boxes, slack, rtl).map(b => ({
+    x: b.x0 / width,
+    y: b.y0 / height,
+    w: (b.x1 - b.x0) / width,
+    h: (b.y1 - b.y0) / height,
+  }));
+}
+
+// Manga pipeline: starts out as the comic one. Manga-specific steps (slanted gutters, framed
+// panels on white pages, screentone, art crossing gutters) get added here, leaving comics alone.
+function findMangaPanels(data, width, height) {
+  return findComicPanels(data, width, height);
+}
+
+// Comic pipeline (see the top of the file). Returns panel boxes in pixels, unordered,
+// or null when the page has no panel structure (splash pages, covers).
+function findComicPanels(data, width, height) {
   const isGutter = pickGutterTest(data, width, height);
-  if (!isGutter) return FULL_PAGE;
+  if (!isGutter) return null;
 
   // Start lenient; only if that finds no panel structure, retry with longer gutter runs,
   // and finally cut along lines that are mostly gutter (borders interrupted by balloons)
@@ -111,15 +140,7 @@ export function detectPanels({ data, width, height }, { rtl = false } = {}) {
       if (tiles(cut)) boxes = cut;
     }
   }
-  if (!boxes || boxes.length < 2) return FULL_PAGE;
-
-  const slack = { x: width * ORDER_SLACK, y: height * ORDER_SLACK };
-  return orderBoxes(boxes, slack, rtl).map(b => ({
-    x: b.x0 / width,
-    y: b.y0 / height,
-    w: (b.x1 - b.x0) / width,
-    h: (b.y1 - b.y0) / height,
-  }));
+  return boxes;
 }
 
 // Fallback XY-cut: split the page at lines where most pixels lie on long straight runs of

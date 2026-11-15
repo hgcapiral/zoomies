@@ -16,6 +16,10 @@
 //    lettering floating on such regions are found separately and boxed.
 // 6. Each bubble also gets a shape mask: its region plus the lettering inside,
 //    grown slightly to take in the balloon's outline.
+//
+// The app now finds bubbles with a trained detector (bubbleModel.js) and uses detectBubbles
+// only as a fallback. bubblesFromBoxes turns the detector's boxes into the same output, with
+// shape masks from step 1's regions and step 4's reading order.
 
 import { detectPanels, orderBoxes, dilate } from './panelDetection.js';
 
@@ -72,6 +76,9 @@ const FLOAT_MIN_LINES = 2;        // ...on at least this many lines
 const FLOAT_MAX_LETTER = 0.018;   // dialogue-sized letters only (fraction of page height); sound effects are bigger
 const FLOAT_MIN_INK = 0.15;       // letters are neither faint specks...
 const FLOAT_MAX_INK = 0.75;       // ...nor solid strokes (share of their box that is ink)
+// Shapes for a trained detector's balloon boxes (bubblesFromBoxes):
+const SHAPE_MIN_FILL = 0.3;       // the balloon's fill covers at least this much of its box...
+const SHAPE_MAX_LEAK = 0.15;      // ...and has at most this much more outside all balloon boxes
 const ORDER_SLACK = 0.01;
 const NESTED_SHARE = 0.8;       // a panel this much inside another is read within it
 
@@ -79,13 +86,14 @@ const luminance = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 
 /**
  * @param {{ data: Uint8ClampedArray, width: number, height: number }} image RGBA (or BGRA) pixels
- * @param {{ rtl?: boolean, panels?: object[] }} options rtl: read right-to-left (manga);
+ * @param {{ rtl?: boolean, style?: 'comic' | 'manga', panels?: object[] }} options rtl: read right-to-left (manga);
  *   panels: the page's panels (normalised, in reading order). Pass them when this image
- *   isn't at the ~1000px scale panel detection is tuned for; otherwise they're detected here.
+ *   isn't at the ~1000px scale panel detection is tuned for; otherwise they're detected here
+ *   with the `style` pipeline.
  * @returns {{ x: number, y: number, w: number, h: number, mask: { width: number, height: number, data: Uint8Array } }[]}
  *   bubbles normalised to 0..1, in reading order; `mask` is 1 inside the bubble's shape, covering its box
  */
-export function detectBubbles(image, { rtl = false, panels } = {}) {
+export function detectBubbles(image, { rtl = false, style = 'comic', panels } = {}) {
   const { width, height } = image;
   const { labels, regions } = growRegions(image);
 
@@ -119,13 +127,103 @@ export function detectBubbles(image, { rtl = false, panels } = {}) {
   });
   boxes.push(...floatingText(image, labels, regions, boxes));
 
-  return orderByPanel(boxes, panels ?? detectPanels(image, { rtl }), width, height, rtl).map(b => ({
+  return orderByPanel(boxes, panels ?? detectPanels(image, { style, rtl }), width, height, rtl).map(b => ({
     x: b.x0 / width,
     y: b.y0 / height,
     w: (b.x1 - b.x0) / width,
     h: (b.y1 - b.y0) / height,
     mask: b.mask,
   }));
+}
+
+/**
+ * Bubbles from a trained detector's boxes, in the same form as detectBubbles: each balloon
+ * gets the shape of the flat-colour region that fills its box (plus the lettering inside);
+ * captions, text without a balloon, and balloons whose fill runs out into the page keep their
+ * rectangle.
+ * @param {{ data: Uint8ClampedArray, width: number, height: number }} image RGBA pixels
+ * @param {{ x: number, y: number, w: number, h: number, balloon: boolean }[]} items boxes normalised to 0..1
+ * @param {{ rtl?: boolean, style?: 'comic' | 'manga', panels?: object[] }} options as for detectBubbles
+ */
+export function bubblesFromBoxes(image, items, { rtl = false, style = 'comic', panels } = {}) {
+  const { width, height } = image;
+  const { labels } = growRegions(image);
+  const pad = Math.round(Math.min(width, height) * BUBBLE_PADDING);
+  const boxes = items.map(item => ({
+    x0: Math.max(0, Math.floor(item.x * width) - pad),
+    y0: Math.max(0, Math.floor(item.y * height) - pad),
+    x1: Math.min(width, Math.ceil((item.x + item.w) * width) + pad),
+    y1: Math.min(height, Math.ceil((item.y + item.h) * height) + pad),
+    balloon: item.balloon,
+  })).filter(b => b.x1 > b.x0 && b.y1 > b.y0);
+
+  // How many pixels of each region lie inside any balloon's box: a balloon's fill stays inside
+  // its box (or a joined neighbour's), while the page background runs far outside them all
+  let maxId = 0;
+  for (let i = 0; i < labels.length; i++) if (labels[i] > maxId) maxId = labels[i];
+  const total = new Int32Array(maxId + 1), covered = new Int32Array(maxId + 1);
+  const inBalloon = new Uint8Array(width * height);
+  for (const b of boxes) {
+    if (!b.balloon) continue;
+    for (let y = b.y0; y < b.y1; y++) inBalloon.fill(1, y * width + b.x0, y * width + b.x1);
+  }
+  for (let i = 0; i < labels.length; i++) {
+    total[labels[i]]++;
+    if (inBalloon[i]) covered[labels[i]]++;
+  }
+
+  for (const b of boxes) {
+    const w = b.x1 - b.x0, h = b.y1 - b.y0;
+    b.mask = (b.balloon && balloonShape(labels, width, b, total, covered, pad)) ||
+      { width: w, height: h, data: new Uint8Array(w * h).fill(1) };
+  }
+
+  return orderByPanel(boxes, panels ?? detectPanels(image, { style, rtl }), width, height, rtl).map(b => ({
+    x: b.x0 / width,
+    y: b.y0 / height,
+    w: (b.x1 - b.x0) / width,
+    h: (b.y1 - b.y0) / height,
+    mask: b.mask,
+  }));
+}
+
+// The balloon's shape inside its box: the region filling most of the box, with the lettering it
+// encloses, grown by `pad` to take in the outline. Null when no such region (a gradient caption)
+// or when it leaks out of the balloon boxes (a borderless balloon on the page background).
+function balloonShape(labels, width, box, total, covered, pad) {
+  const w = box.x1 - box.x0, h = box.y1 - box.y0;
+  const counts = new Map();
+  for (let y = box.y0; y < box.y1; y++) {
+    for (let x = box.x0; x < box.x1; x++) {
+      const id = labels[y * width + x];
+      counts.set(id, (counts.get(id) || 0) + 1);
+    }
+  }
+  let id = -1, inside = 0;
+  for (const [k, n] of counts) if (n > inside) { id = k; inside = n; }
+  if (inside < w * h * SHAPE_MIN_FILL || total[id] - covered[id] > inside * SHAPE_MAX_LEAK) return null;
+
+  // Everything not reachable from the box's edge without crossing the fill is part of the balloon
+  const outside = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  let tail = 0;
+  const seed = (x, y) => {
+    const k = y * w + x;
+    if (!outside[k] && labels[(y + box.y0) * width + x + box.x0] !== id) { outside[k] = 1; queue[tail++] = k; }
+  };
+  for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
+  for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
+  for (let head = 0; head < tail;) {
+    const k = queue[head++];
+    const x = k % w, y = (k - x) / w;
+    if (x > 0) seed(x - 1, y);
+    if (x < w - 1) seed(x + 1, y);
+    if (y > 0) seed(x, y - 1);
+    if (y < h - 1) seed(x, y + 1);
+  }
+  const shape = new Uint8Array(w * h);
+  for (let k = 0; k < w * h; k++) shape[k] = outside[k] ? 0 : 1;
+  return { width: w, height: h, data: dilate(shape, w, h, pad) };
 }
 
 // The bubble's filled shape (region + enclosed lettering) inside its padded box, grown by `pad`
@@ -589,8 +687,9 @@ function floatingText({ data, width, height }, labels, regions, taken) {
   return found;
 }
 
-// Reading order: panel by panel, then within each panel
-function orderByPanel(boxes, panels, width, height, rtl) {
+// Reading order: panel by panel, then within each panel. Boxes ({x0, y0, x1, y1}) are in
+// pixels of a width × height page; panels are normalised, in reading order.
+export function orderByPanel(boxes, panels, width, height, rtl) {
   const panelBoxes = panels.map(p => ({
     x0: p.x * width, y0: p.y * height, x1: (p.x + p.w) * width, y1: (p.y + p.h) * height,
   }));

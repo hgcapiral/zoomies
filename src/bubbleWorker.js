@@ -1,7 +1,9 @@
 // Web Worker: decodes a page image and detects its panels and speech bubbles off the UI thread.
 /* global FileReaderSync */ // worker-only API
-import { detectBubbles } from './bubbleDetection.js';
+import { detectBubbles, bubblesFromBoxes } from './bubbleDetection.js';
+import { detectBubbleBoxes } from './bubbleModel.js';
 import { detectPanels } from './panelDetection.js';
+import { detectMangaPanels } from './mangaPanels.js';
 
 // Each detector runs on a downscaled copy at the scale it's tuned for: bubbles need
 // legible lettering, panels (used for reading order) expect ~1000px pages.
@@ -31,11 +33,40 @@ async function maskToDataUrl({ width, height, data }) {
   return new FileReaderSync().readAsDataURL(blob);
 }
 
-self.onmessage = async ({ data: { id, buffer, rtl } }) => {
+// Manga pages go to the trained model; comics (and manga, if the model can't run) to the rules
+let panelModelFailed = false;
+async function findPanels(bitmap, { style, rtl }) {
+  if (style === 'manga' && !panelModelFailed) {
+    try {
+      return await detectMangaPanels(bitmap, { rtl });
+    } catch (error) {
+      panelModelFailed = true;
+      console.warn('Manga panel model unavailable, using the rule-based detector:', error);
+    }
+  }
+  return detectPanels(pixelsAt(bitmap, PANEL_SIDE), { style, rtl });
+}
+
+// Bubbles from the trained model (shapes from the page's flat-colour regions), or the rules
+let bubbleModelFailed = false;
+async function findBubbles(bitmap, { panels, rtl }) {
+  const image = pixelsAt(bitmap, BUBBLE_SIDE);
+  if (!bubbleModelFailed) {
+    try {
+      return bubblesFromBoxes(image, await detectBubbleBoxes(bitmap), { panels, rtl });
+    } catch (error) {
+      bubbleModelFailed = true;
+      console.warn('Bubble model unavailable, using the rule-based detector:', error);
+    }
+  }
+  return detectBubbles(image, { panels, rtl });
+}
+
+self.onmessage = async ({ data: { id, buffer, rtl, style } }) => {
   try {
     const bitmap = await createImageBitmap(new Blob([buffer]));
-    const panels = detectPanels(pixelsAt(bitmap, PANEL_SIDE), { rtl });
-    const detected = detectBubbles(pixelsAt(bitmap, BUBBLE_SIDE), { panels, rtl });
+    const panels = await findPanels(bitmap, { style, rtl });
+    const detected = await findBubbles(bitmap, { panels, rtl });
     bitmap.close();
     const bubbles = await Promise.all(detected.map(async ({ mask, ...rect }) => ({
       ...rect,

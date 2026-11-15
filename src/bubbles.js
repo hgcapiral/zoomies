@@ -23,17 +23,18 @@ function getWorker() {
 /**
  * Detect the panels and the speech bubbles / captions on a page, each in reading order.
  * @param {string} pageUrl file:// URL of the extracted page image
- * @param {{ rtl?: boolean }} options rtl: right-to-left reading order (manga)
+ * @param {{ rtl?: boolean, style?: 'comic' | 'manga' }} options rtl: right-to-left reading order (manga);
+ *   style: which panel-detection pipeline to use
  * @returns {Promise<{ panels: object[], bubbles: object[] }>} rects { x, y, w, h } normalised to 0..1;
  *   each bubble also has maskUrl, a PNG of its shape over that rect (for CSS mask-image)
  */
-export async function detectPage(pageUrl, { rtl = false } = {}) {
+export async function detectPage(pageUrl, { rtl = false, style = 'comic' } = {}) {
   // Read the file ourselves so the worker gets raw bytes (avoids file:// fetch/canvas restrictions)
   const file = await fs.promises.readFile(fileURLToPath(pageUrl));
   const buffer = file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength);
   return new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    getWorker().postMessage({ id, buffer, rtl }, [buffer]);
+    getWorker().postMessage({ id, buffer, rtl, style }, [buffer]);
   });
 }

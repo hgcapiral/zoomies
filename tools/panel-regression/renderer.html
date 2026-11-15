@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>panel regression</title>
+<script>
+  // Decode and detect exactly like src/bubbleWorker.js (createImageBitmap + OffscreenCanvas,
+  // longest side 1000px), so results match what the app shows.
+  const { ipcRenderer } = require('electron');
+  const fs = require('fs');
+  const PANEL_SIDE = 1000;
+
+  function pixelsAt(bitmap, maxSide) {
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const width = Math.round(bitmap.width * scale);
+    const height = Math.round(bitmap.height * scale);
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    return ctx.getImageData(0, 0, width, height);
+  }
+
+  ipcRenderer.once('run', async (_e, { channel, source, pages }) => {
+    try {
+      const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+      const { detectPanels } = await import(url);
+      const out = [];
+      for (const page of pages) {
+        const file = fs.readFileSync(page.file);
+        const bitmap = await createImageBitmap(new Blob([file]));
+        const panels = detectPanels(pixelsAt(bitmap, PANEL_SIDE), { style: page.style, rtl: page.rtl });
+        bitmap.close();
+        out.push({ book: page.book, index: page.index, panels });
+        ipcRenderer.send('page-done');
+      }
+      ipcRenderer.send(channel, { pages: out });
+    } catch (error) {
+      ipcRenderer.send(channel, { error: String(error && error.stack || error) });
+    }
+  });
+</script>
