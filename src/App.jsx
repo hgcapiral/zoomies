@@ -4,10 +4,7 @@ import { THEMES, DEFAULT_THEME, applyTheme } from './themes.js';
 const { ipcRenderer } = window.require ? window.require('electron') : {};
 
 const SIDEBAR_WIDTH = 560; // px
-const BUBBLE_MARGIN = 12; // px an enlarged bubble keeps from the viewer's edges
-const PANEL_MARGIN = 24;  // px of breathing room around a zoomed panel
-const MAX_PANEL_ZOOM = 3; // never magnify a panel beyond 3x the page's native resolution
-const PANEL_TRANSITION = '450ms cubic-bezier(0.22, 1, 0.36, 1)';
+const ZOOM_MARGIN = 12; // px an enlarged panel or bubble keeps from the viewer's edges
 
 // View modes: magnifier lens, panel-by-panel zoom (Marvel Unlimited style),
 // or bubble-by-bubble zoom (Google Play Books style)
@@ -27,22 +24,7 @@ function fitPage(viewer, page) {
   };
 }
 
-// Zoom the page so `panel` (a rect normalised to the page) is centred and fills the viewer.
-// `focus` is where the panel lands, in viewer pixels.
-function panelZoom(viewer, page, panel) {
-  const fx = panel.x * page.width, fy = panel.y * page.height;
-  const fw = panel.w * page.width, fh = panel.h * page.height;
-  const scale = Math.min(
-    (viewer.width - 2 * PANEL_MARGIN) / fw,
-    (viewer.height - 2 * PANEL_MARGIN) / fh,
-    MAX_PANEL_ZOOM,
-  );
-  const tx = viewer.width / 2 - (fx + fw / 2) * scale;
-  const ty = viewer.height / 2 - (fy + fh / 2) * scale;
-  return { scale, tx, ty, focus: { left: tx + fx * scale, top: ty + fy * scale, width: fw * scale, height: fh * scale } };
-}
-
-// A bubble's rect (normalised to the page) in viewer pixels
+// A panel's or bubble's rect (normalised to the page) in viewer pixels
 function bubbleRect(page, layout, bubble) {
   return {
     left: layout.tx + bubble.x * page.width * layout.scale,
@@ -64,26 +46,39 @@ function bubbleAt(page, layout, bubbles, x, y) {
   return hit;
 }
 
-// Place an enlarged copy of `bubble` (rect normalised to the page) over its spot on the page
-function bubbleZoom(viewer, page, layout, bubble, zoom) {
+// A panel grown to take in the bubbles that belong to it (centred inside it) but poke out
+// over its border, so zooming the panel doesn't cut them off
+function withBubbles(panel, bubbles = []) {
+  let x0 = panel.x, y0 = panel.y, x1 = panel.x + panel.w, y1 = panel.y + panel.h;
+  for (const b of bubbles) {
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    if (cx < panel.x || cx > panel.x + panel.w || cy < panel.y || cy > panel.y + panel.h) continue;
+    x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+// Place an enlarged copy of a panel or bubble (rect normalised to the page) over its spot on the page
+function popOutZoom(viewer, page, layout, bubble, zoom) {
   const { left: bx, top: by, width: bw, height: bh } = bubbleRect(page, layout, bubble);
   const z = Math.max(1, Math.min(
     zoom,
-    (viewer.width - 2 * BUBBLE_MARGIN) / bw,
-    (viewer.height - 2 * BUBBLE_MARGIN) / bh,
+    (viewer.width - 2 * ZOOM_MARGIN) / bw,
+    (viewer.height - 2 * ZOOM_MARGIN) / bh,
   ));
   const width = bw * z, height = bh * z;
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
-  const left = clamp(bx + bw / 2 - width / 2, BUBBLE_MARGIN, viewer.width - width - BUBBLE_MARGIN);
-  const top = clamp(by + bh / 2 - height / 2, BUBBLE_MARGIN, viewer.height - height - BUBBLE_MARGIN);
+  const left = clamp(bx + bw / 2 - width / 2, ZOOM_MARGIN, viewer.width - width - ZOOM_MARGIN);
+  const top = clamp(by + bh / 2 - height / 2, ZOOM_MARGIN, viewer.height - height - ZOOM_MARGIN);
   return {
     left, top, width, height,
-    // The page image inside, scaled so the bubble's area lines up with the box
+    // The page image inside, scaled so the rect's area lines up with the box
     imageLeft: -bubble.x * page.width * layout.scale * z,
     imageTop: -bubble.y * page.height * layout.scale * z,
     imageWidth: page.width * layout.scale * z,
     imageHeight: page.height * layout.scale * z,
-    // Animation start: shrunk back onto the bubble's original spot
+    // Animation start: shrunk back onto its original spot
     popFrom: `translate(${bx + bw / 2 - (left + width / 2)}px, ${by + bh / 2 - (top + height / 2)}px) scale(${1 / z})`,
   };
 }
@@ -147,6 +142,7 @@ export default function App() {
   const [fullPageFirst, setFullPageFirst] = useStoredSetting('fullPageFirst', true); // show the whole page before zooming in
   const [fullPageAfter, setFullPageAfter] = useStoredSetting('fullPageAfter', false); // and again after the last panel/bubble
   const [bubbleZoomLevel, setBubbleZoomLevel] = useStoredSetting('bubbleZoom', 2.5); // how much an active bubble is enlarged
+  const [panelZoomLevel, setPanelZoomLevel] = useStoredSetting('panelZoom', 2); // ...and an active panel (both capped to fit the viewer)
   // null = whole page before, a panel/bubble index, 'last', or 'after' = whole page after the last one
   const [step, setStep] = useState(null);
   const [detectedByPage, setDetectedByPage] = useState({}); // page URL -> { panels, bubbles }
@@ -165,7 +161,6 @@ export default function App() {
   // Geometry for positioning the page image
   const [viewerSize, setViewerSize] = useState({ width: 0, height: 0 });
   const [pageSize, setPageSize] = useState(null); // { src, width, height } natural size of the shown page
-  const [animatedSrc, setAnimatedSrc] = useState(null); // page whose first frame is drawn; zooms may animate
   const viewerRef = useRef(null);
 
   const [lensData, setLensData] = useState({ show: false, clientX: 0, clientY: 0, bgX: 0, bgY: 0, bgWidth: 0, bgHeight: 0 });
@@ -273,13 +268,6 @@ export default function App() {
     }
   }, [viewMode, mangaMode, pages, currentIndex]);
 
-  // A new page appears in place; only animate panel zooms once its first frame is drawn
-  useEffect(() => {
-    if (!pageSize) return;
-    const frame = requestAnimationFrame(() => setAnimatedSrc(pageSize.src));
-    return () => cancelAnimationFrame(frame);
-  }, [pageSize]);
-
   // Track the viewer's size so the page can be fitted to it
   useEffect(() => {
     const el = viewerRef.current;
@@ -304,12 +292,10 @@ export default function App() {
   const activeBubble = bubbleMode ? activeIndex : null;
   const activePanel = panelMode ? activeIndex : null;
   const pageReady = pageSize && pageSize.src === pageUrl && viewerSize.width > 0;
-  const layout = pageReady
-    ? (activePanel !== null ? panelZoom(viewerSize, pageSize, pagePanels[activePanel]) : fitPage(viewerSize, pageSize))
-    : null;
-  const animate = animatedSrc === pageUrl;
-  const zoomBox = layout && activeBubble !== null
-    ? bubbleZoom(viewerSize, pageSize, layout, pageBubbles[activeBubble], bubbleZoomLevel)
+  const layout = pageReady ? fitPage(viewerSize, pageSize) : null;
+  const zoomBox = !layout ? null
+    : activeBubble !== null ? popOutZoom(viewerSize, pageSize, layout, pageBubbles[activeBubble], bubbleZoomLevel)
+    : activePanel !== null ? popOutZoom(viewerSize, pageSize, layout, withBubbles(pagePanels[activePanel], pageBubbles), panelZoomLevel)
     : null;
 
   const turnPage = (delta) => {
@@ -649,7 +635,7 @@ export default function App() {
                     </label>
                   </div>
 
-                  {/* Lens | Bubble View side by side; Bubble View centred vertically beside Lens */}
+                  {/* Lens | Panel / Bubble View side by side; the latter centred vertically beside Lens */}
                   <div className="grid grid-cols-2 gap-6">
                     <div className="space-y-3 min-w-0">
                       <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Lens</h2>
@@ -678,7 +664,11 @@ export default function App() {
                       </div>
                     </div>
                     <div className="space-y-3 min-w-0 self-center">
-                      <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Bubble View</h2>
+                      <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Panel / Bubble View</h2>
+                      <div>
+                        <label className="text-xs text-gray-300 flex justify-between mb-1"><span>Panel Zoom</span><span className="text-gray-500">{panelZoomLevel}x</span></label>
+                        <input type="range" min="1.25" max="4" step="0.25" value={panelZoomLevel} onChange={(e) => setPanelZoomLevel(Number(e.target.value))} className="w-full accent-accent-500 cursor-pointer" />
+                      </div>
                       <div>
                         <label className="text-xs text-gray-300 flex justify-between mb-1"><span>Bubble Zoom</span><span className="text-gray-500">{bubbleZoomLevel}x</span></label>
                         <input type="range" min="1.5" max="5" step="0.25" value={bubbleZoomLevel} onChange={(e) => setBubbleZoomLevel(Number(e.target.value))} className="w-full accent-accent-500 cursor-pointer" />
@@ -765,24 +755,10 @@ export default function App() {
                   height: layout ? pageSize.height : undefined,
                   transformOrigin: '0 0',
                   transform: layout ? `translate(${layout.tx}px, ${layout.ty}px) scale(${layout.scale})` : undefined,
-                  transition: animate ? `transform ${PANEL_TRANSITION}` : 'none',
                   visibility: layout ? 'visible' : 'hidden',
                   pointerEvents: 'none'
                 }}
               />
-
-              {/* Panel View: darken everything outside the zoomed panel */}
-              {panelMode && layout && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    ...(layout.focus ?? { left: layout.tx, top: layout.ty, width: pageSize.width * layout.scale, height: pageSize.height * layout.scale }),
-                    boxShadow: `0 0 0 200vmax rgba(0, 0, 0, ${activePanel !== null ? 0.88 : 0})`,
-                    transition: animate ? `all ${PANEL_TRANSITION}` : 'none',
-                    pointerEvents: 'none'
-                  }}
-                />
-              )}
 
               {/* Tint the bubble under the mouse (in its own shape) to show it can be clicked */}
               {bubbleMode && layout && hoverBubble >= 0 && hoverBubble !== activeBubble && pageBubbles?.[hoverBubble] && (
@@ -797,11 +773,11 @@ export default function App() {
                 />
               )}
 
-              {/* Enlarged copy of the active bubble, cut to its shape, popping out of its spot on the page.
-                  The outer layer casts a shadow that follows the shape; the inner one clips to it. */}
+              {/* Enlarged copy of the active panel or bubble (cut to its shape), popping out of its spot
+                  on the page. The outer layer casts a shadow that follows the shape; the inner one clips to it. */}
               {zoomBox && (
                 <div
-                  key={`${pageUrl}#${activeBubble}`}
+                  key={`${pageUrl}#${viewMode}${activeIndex}`}
                   style={{
                     position: 'absolute',
                     left: zoomBox.left,
@@ -815,7 +791,7 @@ export default function App() {
                     zIndex: 10
                   }}
                 >
-                  <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', ...shapeMask(pageBubbles[activeBubble].maskUrl) }}>
+                  <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', ...(activeBubble !== null ? shapeMask(pageBubbles[activeBubble].maskUrl) : {}) }}>
                     <img
                       src={pageUrl}
                       alt=""
