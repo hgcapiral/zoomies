@@ -1,9 +1,9 @@
 // Web Worker: decodes a page image and detects its panels and speech bubbles off the UI thread.
 /* global FileReaderSync */ // worker-only API
 import { detectBubbles, bubblesFromBoxes } from './bubbleDetection.js';
-import { detectBubbleBoxes } from './bubbleModel.js';
+import { detectBubbleBoxes, loadBubbleModel } from './bubbleModel.js';
 import { detectPanels } from './panelDetection.js';
-import { detectMangaPanels } from './mangaPanels.js';
+import { detectMangaPanels, loadMangaPanelModel } from './mangaPanels.js';
 
 // Each detector runs on a downscaled copy at the scale it's tuned for: bubbles need
 // legible lettering, panels (used for reading order) expect ~1000px pages.
@@ -62,7 +62,7 @@ async function findBubbles(bitmap, { panels, rtl }) {
   return detectBubbles(image, { panels, rtl });
 }
 
-self.onmessage = async ({ data: { id, buffer, rtl, style } }) => {
+async function detect({ id, buffer, rtl, style }) {
   try {
     const bitmap = await createImageBitmap(new Blob([buffer]));
     const panels = await findPanels(bitmap, { style, rtl });
@@ -76,4 +76,30 @@ self.onmessage = async ({ data: { id, buffer, rtl, style } }) => {
   } catch (error) {
     self.postMessage({ id, error: String(error) });
   }
+}
+
+// One page at a time (pages worked on together all finish late), the page on screen first:
+// the most recent request marked current, then the rest in the order they came
+const queue = [];
+let busy = false;
+async function work() {
+  if (busy) return;
+  busy = true;
+  while (queue.length > 0) {
+    const k = queue.findLastIndex(request => request.current);
+    const [request] = queue.splice(k < 0 ? 0 : k, 1);
+    await detect(request);
+  }
+  busy = false;
+}
+
+self.onmessage = ({ data }) => {
+  if (data.warmUp) {
+    // Load the models now; a failure shows up (and falls back) when a page needs them
+    loadBubbleModel().catch(() => {});
+    loadMangaPanelModel().catch(() => {});
+    return;
+  }
+  queue.push(data);
+  work();
 };

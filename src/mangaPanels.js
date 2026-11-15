@@ -16,6 +16,7 @@ const ORDER_SLACK = 0.03;  // boxes may poke this far (fraction of page) across 
 const FULL_PAGE = [{ x: 0, y: 0, w: 1, h: 1 }];
 
 let session = null;
+export const loadMangaPanelModel = () => (session ??= ort.InferenceSession.create(MODEL_URL));
 
 /**
  * @param {ImageBitmap} bitmap the page, at any size
@@ -24,8 +25,7 @@ let session = null;
  *   in reading order; one full-page panel when fewer than two are found (like detectPanels)
  */
 export async function detectMangaPanels(bitmap, { rtl = true } = {}) {
-  session ??= ort.InferenceSession.create(MODEL_URL);
-  const model = await session;
+  const model = await loadMangaPanelModel();
   const { tensor, toPage } = imageTensor(bitmap, INPUT_SIZE, { letterbox: true });
   const { output0 } = await model.run({ [model.inputNames[0]]: tensor });
 

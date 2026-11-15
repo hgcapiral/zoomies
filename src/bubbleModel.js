@@ -21,6 +21,10 @@ const DUPLICATE_IOU = 0.7;   // a box overlapping a likelier one this much is th
 const TEXT_IN_BALLOON = 0.5; // text this much inside a kept balloon is that balloon's lettering
 
 let session = null;
+export function loadBubbleModel() {
+  session ??= import('./onnx.js').then(({ ort }) => ort.InferenceSession.create(MODEL_URL));
+  return session;
+}
 
 /**
  * @param {ImageBitmap} bitmap the page, at any size
@@ -29,8 +33,7 @@ let session = null;
  */
 export async function detectBubbleBoxes(bitmap) {
   const { ort, imageTensor } = await import('./onnx.js');
-  session ??= ort.InferenceSession.create(MODEL_URL);
-  const model = await session;
+  const model = await loadBubbleModel();
   const { tensor } = imageTensor(bitmap, INPUT_SIZE, { letterbox: false });
   // The model scales its boxes to this size: keep them in input pixels
   const sizes = new ort.Tensor('int64', BigInt64Array.from([BigInt(INPUT_SIZE), BigInt(INPUT_SIZE)]), [1, 2]);

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { detectPage } from './bubbles.js';
+import { detectPage, warmUpDetection } from './bubbles.js';
 import { THEMES, DEFAULT_THEME, applyTheme } from './themes.js';
 const { ipcRenderer } = window.require ? window.require('electron') : {};
 
@@ -148,6 +148,8 @@ export default function App() {
   const [detectedByPage, setDetectedByPage] = useState({}); // page URL -> { panels, bubbles }
   const [hoverBubble, setHoverBubble] = useState(-1); // bubble under the mouse in Bubble View
   const requestedPages = useRef(new Set());
+  const detecting = useRef(false); // a page is being detected (one at a time)
+  const [detectionTick, setDetectionTick] = useState(0); // bumps when one finishes, to start the next
 
   // Manga: read right-to-left (panels and bubbles), optionally with ← as "forward"
   const [theme, setTheme] = useStoredSetting('theme', DEFAULT_THEME);
@@ -193,9 +195,10 @@ export default function App() {
     };
   }, []);
 
-  // Load saved bookmarks on startup
+  // Load saved bookmarks on startup, and the detection models in the background
   useEffect(() => {
     ipcRenderer?.invoke('bookmarks-get').then(setBookmarks);
+    warmUpDetection();
   }, []);
 
   // Record the current page whenever it changes, so reading can resume later
@@ -247,27 +250,35 @@ export default function App() {
     setBookmarks(await ipcRenderer.invoke('bookmarks-remove', filePath));
   };
 
-  // Detect panels and bubbles for the current page, plus its neighbours so page turns feel instant
+  // Detect panels and bubbles for the whole comic in the background, one page at a time: the
+  // page on screen first, then the pages after it, then the ones before (nearest first). Each
+  // finished page (or page turn) picks the next, so a jump waits behind at most one page.
   useEffect(() => {
-    if (viewMode === 'lens' || pages.length === 0) return;
+    if (pages.length === 0 || detecting.current) return;
+    const order = [currentIndex];
+    for (let i = currentIndex + 1; i < pages.length; i++) order.push(i);
+    for (let i = currentIndex - 1; i >= 0; i--) order.push(i);
+    const next = order.find(i => !requestedPages.current.has(pages[i]));
+    if (next === undefined) return;
+
+    const url = pages[next];
     const generation = comicGeneration.current;
-    for (const i of [currentIndex, currentIndex + 1, currentIndex - 1]) {
-      const url = pages[i];
-      if (!url || requestedPages.current.has(url)) continue;
-      requestedPages.current.add(url);
-      // Manga mode picks both the reading order and the manga panel detector
-      detectPage(url, { rtl: mangaMode, style: mangaMode ? 'manga' : 'comic' })
-        .catch((error) => {
-          console.error("Panel/bubble detection failed:", error);
-          return { panels: [], bubbles: [] };
-        })
-        .then((detected) => {
-          if (comicGeneration.current === generation) {
-            setDetectedByPage(prev => ({ ...prev, [url]: detected }));
-          }
-        });
-    }
-  }, [viewMode, mangaMode, pages, currentIndex]);
+    requestedPages.current.add(url);
+    detecting.current = true;
+    // Manga mode picks both the reading order and the manga panel detector
+    detectPage(url, { rtl: mangaMode, style: mangaMode ? 'manga' : 'comic', current: next === currentIndex })
+      .catch((error) => {
+        console.error("Panel/bubble detection failed:", error);
+        return { panels: [], bubbles: [] };
+      })
+      .then((detected) => {
+        detecting.current = false;
+        if (comicGeneration.current === generation) {
+          setDetectedByPage(prev => ({ ...prev, [url]: detected }));
+        }
+        setDetectionTick(t => t + 1); // pick the next page, even if this one was for another comic
+      });
+  }, [mangaMode, pages, currentIndex, detectionTick]);
 
   // Track the viewer's size so the page can be fitted to it
   useEffect(() => {
@@ -282,6 +293,7 @@ export default function App() {
 
   const pageUrl = pages[currentIndex];
   const detected = detectedByPage[pageUrl];
+  const pagesDetected = pages.reduce((n, url) => n + (detectedByPage[url] ? 1 : 0), 0);
   const pageBubbles = detected?.bubbles;
   // A page without gutters is one full-page "panel": nothing to zoom into
   const pagePanels = detected && detected.panels.filter(p => p.w * p.h < 0.9);
@@ -457,6 +469,22 @@ export default function App() {
                   <p className="text-xs text-gray-600 mt-0.5">
                     Click sides or <kbd className="bg-gray-800 px-1 rounded text-gray-300">←</kbd> <kbd className="bg-gray-800 px-1 rounded text-gray-300">→</kbd> to {viewMode !== 'lens' ? `step through ${noun}s` : 'turn pages'}{leftIsForward && ' (← is forward)'}
                   </p>
+                  {/* Background detection of every page, so Panel/Bubble View page turns are instant */}
+                  <div
+                    className="flex items-center gap-2 mt-2"
+                    title="Panels and bubbles are found for every page in the background, starting with the page on screen"
+                  >
+                    {pagesDetected < pages.length ? (
+                      <>
+                        <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+                          <div className="h-full bg-accent-500 rounded-full transition-[width] duration-300" style={{ width: `${(pagesDetected / pages.length) * 100}%` }} />
+                        </div>
+                        <span className="shrink-0 text-[11px] text-gray-500 tabular-nums">Finding bubbles · {pagesDetected} / {pages.length} pages</span>
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-gray-500">✓ Bubbles ready on all {pages.length} pages</span>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <p className="text-xs text-gray-500 mt-2 mb-4">Open a comic to start reading.</p>
