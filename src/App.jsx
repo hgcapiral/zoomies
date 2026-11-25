@@ -158,6 +158,10 @@ export default function App() {
   const [mangaMode, setMangaMode] = useStoredSetting('mangaMode', false);
   const [swapArrows, setSwapArrows] = useStoredSetting('mangaSwapArrows', true);
   const leftIsForward = mangaMode && swapArrows;
+  // Panel detector, chosen apart from the reading direction (a left-to-right manga, a
+  // black-and-white comic): 'comic' = the rules, 'manga' = the trained model. Until it's
+  // set, it follows Manga mode, which used to pick it.
+  const [panelStyle, setPanelStyle] = useStoredSetting('panelStyle', mangaMode ? 'manga' : 'comic');
   const comicGeneration = useRef(0); // bumps per opened comic so stale detections are ignored
 
   // Geometry for positioning the page image
@@ -265,8 +269,8 @@ export default function App() {
     const generation = comicGeneration.current;
     requestedPages.current.add(url);
     detecting.current = true;
-    // Manga mode picks both the reading order and the manga panel detector
-    detectPage(url, { rtl: mangaMode, style: mangaMode ? 'manga' : 'comic', current: next === currentIndex })
+    // Manga mode sets the reading order; the panel detector is its own setting
+    detectPage(url, { rtl: mangaMode, style: panelStyle, current: next === currentIndex })
       .catch((error) => {
         console.error("Panel/bubble detection failed:", error);
         return { panels: [], bubbles: [] };
@@ -278,7 +282,7 @@ export default function App() {
         }
         setDetectionTick(t => t + 1); // pick the next page, even if this one was for another comic
       });
-  }, [mangaMode, pages, currentIndex, detectionTick]);
+  }, [mangaMode, panelStyle, pages, currentIndex, detectionTick]);
 
   // Track the viewer's size so the page can be fitted to it
   useEffect(() => {
@@ -338,12 +342,20 @@ export default function App() {
     turnPage(-1);
   };
 
-  const toggleMangaMode = (on) => {
-    comicGeneration.current++; // results in the old order are discarded
+  // Detect the comic again after a detection setting changes; results from the old one are discarded
+  const restartDetection = () => {
+    comicGeneration.current++;
     requestedPages.current = new Set();
     setDetectedByPage({});
     setStep(fullPageFirst ? null : 0);
+  };
+  const toggleMangaMode = (on) => {
+    restartDetection();
     setMangaMode(on);
+  };
+  const changePanelStyle = (style) => {
+    restartDetection();
+    setPanelStyle(style);
   };
 
   const switchViewMode = (mode) => {
@@ -643,6 +655,20 @@ export default function App() {
                         className="accent-accent-500 cursor-pointer disabled:cursor-default"
                       />
                       Swap ← / → (← and left click go forward)
+                    </label>
+                    <label
+                      className="flex items-center gap-2 text-xs text-gray-300"
+                      title="Finds the panels for Panel View and for the order of bubbles"
+                    >
+                      Panel detector
+                      <select
+                        value={panelStyle}
+                        onChange={(e) => changePanelStyle(e.target.value)}
+                        className="bg-gray-800 border border-gray-700 rounded-md px-1.5 py-0.5 text-xs cursor-pointer"
+                      >
+                        <option value="comic">Comic (rules)</option>
+                        <option value="manga">Manga (trained model)</option>
+                      </select>
                     </label>
                     <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
                       <input
