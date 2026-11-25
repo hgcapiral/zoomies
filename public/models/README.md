@@ -15,7 +15,7 @@ Speech bubble / caption detector used by Bubble View (`src/bubbleModel.js`), in 
 
 ## manga-panels-yolo26n.onnx
 
-Manga panel detector used in Manga mode (`src/mangaPanels.js`).
+Manga panel detector, used when the Panel detector setting is "Manga" (`src/mangaPanels.js`).
 
 - Model: [leoxs22/manga-panel-detector-yolo26n](https://huggingface.co/leoxs22/manga-panel-detector-yolo26n),
   Ultralytics YOLO26n fine-tuned on Manga109-s (classes: 0 panel, 1 text), 640×640 input.

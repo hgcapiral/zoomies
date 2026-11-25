@@ -7,14 +7,38 @@ const unrar = require('node-unrar-js');
 
 // Each running instance extracts into its own folder, so one instance clearing its
 // cache can't delete the pages another instance is showing.
-const CACHE_ROOT = path.join(app.getPath('temp'), 'comic-glass-reader');
+const CACHE_ROOT = path.join(app.getPath('temp'), 'zoomies');
+const OLD_NAME_CACHE_ROOT = path.join(app.getPath('temp'), 'comic-glass-reader'); // before the rename
 const INSTANCE_PREFIX = 'instance-';
 const CACHE_DIR = path.join(CACHE_ROOT, INSTANCE_PREFIX + process.pid);
 
 // Launched as `electron electron/main.cjs`, Electron would store data in a generic
 // "Electron" folder shared by every unpackaged Electron app; give the app its own.
 const LEGACY_USER_DATA = app.getPath('userData');
-app.setPath('userData', path.join(app.getPath('appData'), 'Comic Glass Reader'));
+const USER_DATA = path.join(app.getPath('appData'), 'Zoomies');
+
+// The app used to be called Comic Glass Reader: move its data folder (bookmarks, and the
+// settings in Local Storage) to the new name, once. If an instance under the old name is
+// still running, the folder is in use, so copy what matters instead.
+const OLD_NAME_USER_DATA = path.join(app.getPath('appData'), 'Comic Glass Reader');
+function moveOldNameUserData() {
+  if (fs.existsSync(USER_DATA) || !fs.existsSync(OLD_NAME_USER_DATA)) return;
+  try {
+    fs.renameSync(OLD_NAME_USER_DATA, USER_DATA);
+    return;
+  } catch {
+    // copied below
+  }
+  for (const item of ['bookmarks.json', 'Local Storage']) {
+    try {
+      fs.cpSync(path.join(OLD_NAME_USER_DATA, item), path.join(USER_DATA, item), { recursive: true });
+    } catch (err) {
+      console.error(`Failed to copy ${item} from the old data folder:`, err);
+    }
+  }
+}
+moveOldNameUserData();
+app.setPath('userData', USER_DATA);
 
 function clearCache() {
   if (fs.existsSync(CACHE_DIR)) {
@@ -36,10 +60,10 @@ function isProcessAlive(pid) {
 }
 
 // Remove folders left behind by instances that crashed or were killed.
-function clearStaleCaches() {
+function clearStaleCaches(root = CACHE_ROOT) {
   let entries;
   try {
-    entries = fs.readdirSync(CACHE_ROOT);
+    entries = fs.readdirSync(root);
   } catch {
     return;
   }
@@ -48,10 +72,21 @@ function clearStaleCaches() {
     const pid = Number(name.slice(INSTANCE_PREFIX.length));
     if (pid === process.pid || (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid))) continue;
     try {
-      fs.rmSync(path.join(CACHE_ROOT, name), { recursive: true, force: true });
+      fs.rmSync(path.join(root, name), { recursive: true, force: true });
     } catch (err) {
       console.error("Failed to clear stale cache:", err);
     }
+  }
+}
+
+// The cache folder under the app's old name: clear what dead instances left, and remove it
+// once no instance under the old name is using it
+function clearOldNameCaches() {
+  clearStaleCaches(OLD_NAME_CACHE_ROOT);
+  try {
+    fs.rmdirSync(OLD_NAME_CACHE_ROOT); // only succeeds when empty
+  } catch {
+    // missing, or still in use
   }
 }
 
@@ -72,6 +107,7 @@ function createWindow() {
 app.whenReady().then(() => {
   clearCache();
   clearStaleCaches();
+  clearOldNameCaches();
   createWindow();
 });
 

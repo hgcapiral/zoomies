@@ -473,7 +473,7 @@ export default function App() {
 
             {/* Header: title, current comic, open button */}
             <div className="p-5 pb-4 border-b border-gray-800 shrink-0">
-              <h1 className="text-lg font-bold text-accent-400 tracking-tight">Comic Glass Reader</h1>
+              <h1 className="text-lg font-bold text-accent-400 tracking-tight">Zoomies</h1>
               {currentFile && pages.length > 0 ? (
                 <div className="mt-2 mb-4">
                   <p className="text-sm text-gray-200 truncate" title={currentFile}>
