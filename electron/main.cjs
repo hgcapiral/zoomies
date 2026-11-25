@@ -165,8 +165,14 @@ ipcMain.handle('open-comic-path', async (_event, filePath) => {
   return loadComic(filePath);
 });
 
+// The comic extracted into CACHE_DIR. Opening it again reuses its pages rather than
+// extracting over the ones on screen (and under the detection worker).
+let loaded = null;
+
 async function loadComic(filePath) {
+  if (loaded?.filePath === filePath && fs.existsSync(CACHE_DIR)) return loaded;
   try {
+    loaded = null;
     clearCache();
     fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -203,7 +209,8 @@ async function loadComic(filePath) {
     const imageFiles = getImages(CACHE_DIR);
     imageFiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-    return { filePath, pages: imageFiles.map(file => url.pathToFileURL(file).href) };
+    loaded = { filePath, pages: imageFiles.map(file => url.pathToFileURL(file).href) };
+    return loaded;
 
   } catch (error) {
     console.error("Failed to process comic file:", error);

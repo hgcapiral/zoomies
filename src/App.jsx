@@ -226,6 +226,8 @@ export default function App() {
     try {
       const result = await ipcRenderer.invoke(channel, ...args);
       if (result && result.pages.length > 0) {
+        // The comic already open (picked again with Browse): keep the place and the detection
+        if (result.filePath === currentFile) return;
         const saved = bookmarks.find(b => b.filePath === result.filePath);
         const resumePage = saved ? Math.min(saved.lastPage, result.pages.length - 1) : 0;
         comicGeneration.current++;
@@ -247,7 +249,10 @@ export default function App() {
   };
 
   const handleOpenComic = () => loadComic('open-comic-file');
-  const handleOpenBookmark = (filePath) => loadComic('open-comic-path', filePath);
+  const handleOpenBookmark = (filePath) => {
+    if (filePath === currentFile) return; // already open: nothing to reload
+    loadComic('open-comic-path', filePath);
+  };
 
   const handleRemoveBookmark = async (e, filePath) => {
     e.stopPropagation();
@@ -548,8 +553,8 @@ export default function App() {
                           onClick={() => !isLoading && handleOpenBookmark(b.filePath)}
                           onKeyDown={(e) => e.key === 'Enter' && !isLoading && handleOpenBookmark(b.filePath)}
                           title={b.filePath}
-                          className={`group rounded-md px-2 py-2 cursor-pointer transition border ${
-                            isCurrent ? 'bg-accent-950/60 border-accent-800' : 'border-transparent hover:bg-gray-800'
+                          className={`group rounded-md px-2 py-2 transition border ${
+                            isCurrent ? 'cursor-default bg-accent-950/60 border-accent-800' : 'cursor-pointer border-transparent hover:bg-gray-800'
                           } ${b.missing ? 'opacity-50' : ''}`}
                         >
                           <div className="flex items-center gap-2">
